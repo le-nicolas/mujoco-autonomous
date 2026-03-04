@@ -6,7 +6,7 @@ from pathlib import Path
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import EvalCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.monitor import Monitor
 
 from vision_reacher import ReacherPixelEncoder, VisionReacherEnv
 
@@ -15,21 +15,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train SAC on pixel-only MuJoCo Reacher."
     )
-    parser.add_argument("--total-timesteps", type=int, default=300_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--buffer-size", type=int, default=30_000)
+    parser.add_argument("--buffer-size", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--learning-starts", type=int, default=5_000)
+    parser.add_argument("--learning-starts", type=int, default=10_000)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--train-freq", type=int, default=1)
     parser.add_argument("--gradient-steps", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=10_000)
+    parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--image-size", type=int, default=64)
-    parser.add_argument("--frame-stack", type=int, default=1)
-    parser.add_argument("--grayscale", action="store_true")
+    parser.add_argument("--frame-stack", type=int, default=3)
+    parser.add_argument(
+        "--grayscale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--max-episode-steps", type=int, default=1_000)
     parser.add_argument("--xml-file", type=str, default=None)
     parser.add_argument("--features-dim", type=int, default=256)
@@ -38,36 +42,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--run-name", type=str, default="vision_reacher_sac")
     parser.add_argument("--log-dir", type=str, default="runs")
+    parser.add_argument(
+        "--live-view",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show MuJoCo viewer during training.",
+    )
+    parser.add_argument(
+        "--final-play-episodes",
+        type=int,
+        default=3,
+        help="Deterministic playback episodes after training (0 to disable).",
+    )
     parser.add_argument("--progress-bar", action="store_true")
     return parser.parse_args()
 
 
-def make_env(
-    seed: int,
-    image_size: int,
-    frame_stack: int,
-    grayscale: bool,
-    max_episode_steps: int,
-    xml_file: str | None,
-):
-    def _init():
-        env = VisionReacherEnv(
-            image_size=image_size,
-            frame_stack=frame_stack,
-            grayscale=grayscale,
-            max_episode_steps=max_episode_steps,
-            xml_file=xml_file,
-            render_mode="rgb_array",
-        )
-        env.reset(seed=seed)
-        return env
+def make_env(args: argparse.Namespace, seed: int, render_mode: str) -> Monitor:
+    env = VisionReacherEnv(
+        image_size=args.image_size,
+        frame_stack=args.frame_stack,
+        grayscale=args.grayscale,
+        max_episode_steps=args.max_episode_steps,
+        xml_file=args.xml_file,
+        render_mode=render_mode,
+    )
+    env = Monitor(env)
+    env.reset(seed=seed)
+    return env
 
-    return _init
+
+def run_final_playback(model_path: Path, args: argparse.Namespace) -> None:
+    print(f"Starting final playback from model: {model_path}")
+    env = VisionReacherEnv(
+        image_size=args.image_size,
+        frame_stack=args.frame_stack,
+        grayscale=args.grayscale,
+        max_episode_steps=args.max_episode_steps,
+        xml_file=args.xml_file,
+        render_mode="human",
+    )
+    model = SAC.load(str(model_path), env=env, device=args.device)
+    try:
+        for episode in range(args.final_play_episodes):
+            obs, _ = env.reset(seed=args.seed + 20_000 + episode)
+            done = False
+            ep_reward = 0.0
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                ep_reward += reward
+            print(f"Playback episode {episode + 1}: reward={ep_reward:.3f}")
+    finally:
+        env.close()
 
 
 def main() -> None:
     args = parse_args()
-    grayscale = args.grayscale
 
     run_dir = Path(args.log_dir) / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -77,40 +109,16 @@ def main() -> None:
     if tensorboard_log is None:
         print("tensorboard not installed; disabling tensorboard logging.")
 
-    env_fns = [
-        make_env(
-            seed=args.seed + idx,
-            image_size=args.image_size,
-            frame_stack=args.frame_stack,
-            grayscale=grayscale,
-            max_episode_steps=args.max_episode_steps,
-            xml_file=args.xml_file,
-        )
-        for idx in range(args.num_envs)
-    ]
-    train_env = VecMonitor(DummyVecEnv(env_fns))
-
-    eval_env = VecMonitor(
-        DummyVecEnv(
-            [
-                make_env(
-                    seed=args.seed + 10_000,
-                    image_size=args.image_size,
-                    frame_stack=args.frame_stack,
-                    grayscale=grayscale,
-                    max_episode_steps=args.max_episode_steps,
-                    xml_file=args.xml_file,
-                )
-            ]
-        )
-    )
+    train_render_mode = "human" if args.live_view else "rgb_array"
+    train_env = make_env(args, seed=args.seed, render_mode=train_render_mode)
+    eval_env = make_env(args, seed=args.seed + 10_000, render_mode="rgb_array")
 
     eval_callback = EvalCallback(
-        eval_env,
+        eval_env=eval_env,
         best_model_save_path=str(run_dir / "best_model"),
         log_path=str(run_dir / "eval_logs"),
-        eval_freq=max(args.eval_freq // max(args.num_envs, 1), 1),
-        n_eval_episodes=5,
+        eval_freq=args.eval_freq,
+        n_eval_episodes=args.eval_episodes,
         deterministic=True,
         render=False,
     )
@@ -149,6 +157,12 @@ def main() -> None:
 
     train_env.close()
     eval_env.close()
+
+    best_model_path = run_dir / "best_model" / "best_model.zip"
+    final_model_path = run_dir / "final_model.zip"
+    playback_model = best_model_path if best_model_path.exists() else final_model_path
+    if args.final_play_episodes > 0:
+        run_final_playback(playback_model, args)
 
 
 if __name__ == "__main__":

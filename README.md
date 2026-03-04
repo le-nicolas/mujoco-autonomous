@@ -24,16 +24,25 @@ pip install -r requirements.txt
 ## 2) Train
 
 ```bash
-python train.py --total-timesteps 300000 --run-name reacher_pixels
+python train.py --total-timesteps 1000000 --run-name reacher_pixels
 ```
+
+By default this now does everything in one run:
+
+- trains SAC from pixels
+- shows live MuJoCo arm movement during training
+- runs final deterministic playback episodes after training
 
 Useful options:
 
 - `--image-size 64` (default)
-- `--frame-stack 1` (single RGB frame by default)
-- `--grayscale` (opt-in grayscale)
+- `--frame-stack 3` (default)
+- `--grayscale` (default) / `--no-grayscale` for RGB
 - `--max-episode-steps 1000`
 - `--xml-file assets/reacher.xml` (default local model file)
+- `--no-live-view` to train without opening the viewer
+- `--final-play-episodes 0` to skip post-training playback
+- defaults target real pixel learning runs (`--total-timesteps 1000000`, `--learning-starts 10000`, `--eval-freq 10000`)
 - `--progress-bar`
 
 Artifacts are saved in `runs/<run-name>/`:
@@ -46,6 +55,18 @@ Artifacts are saved in `runs/<run-name>/`:
 
 ```bash
 python eval.py --model-path runs/reacher_pixels/best_model/best_model.zip --episodes 10 --render --deterministic
+```
+
+Create a GIF:
+
+```bash
+python eval.py --model-path runs/reacher_pixels/best_model/best_model.zip --episodes 1 --no-render --save-gif runs/reacher_pixels/policy.gif
+```
+
+Create reward curve plot:
+
+```bash
+python report_pixel.py --run-dir runs/reacher_pixels
 ```
 
 ## State Baseline (Custom 11D State)
