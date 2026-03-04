@@ -1,0 +1,14 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+venv/
+
+runs/
+runs_*/
+runs_state/
+runs_state_*/
+
+*.zip
